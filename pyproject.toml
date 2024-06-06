@@ -21,10 +21,6 @@ dependencies = [
     "appdirs >=1, <2",
 ]
 
-packages = [
-    { include = "ayon_api" }
-]
-
 [project.urls]
 Repository = "https://github.com/ynput/ayon-python-api"
 Changelog = "https://github.com/ynput/ayon-python-api/releases"
