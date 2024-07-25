@@ -328,7 +328,9 @@ def get_server_api_connection():
     """
     return GlobalContext.get_server_api_connection()
 
-
+# ------------------------------------------------
+#     This content is generated automatically.
+# ------------------------------------------------
 def get_base_url():
     con = get_server_api_connection()
     return con.get_base_url()
@@ -426,6 +428,17 @@ def set_max_retries(*args, **kwargs):
     """
     con = get_server_api_connection()
     return con.set_max_retries(*args, **kwargs)
+
+
+def is_service_user():
+    """Check if connection is using service API key.
+
+    Returns:
+        bool: Used api key belongs to service user.
+
+    """
+    con = get_server_api_connection()
+    return con.is_service_user()
 
 
 def get_site_id():
@@ -581,9 +594,13 @@ def get_server_version_tuple():
 def get_users(*args, **kwargs):
     """Get Users.
 
+    Only administrators and managers can fetch all users. For other users
+        it is required to pass in 'project_name' filter.
+
     Args:
+        project_name (Optional[str]): Project name.
         usernames (Optional[Iterable[str]]): Filter by usernames.
-        fields (Optional[Iterable[str]]): fields to be queried
+        fields (Optional[Iterable[str]]): Fields to be queried
             for users.
 
     Returns:
@@ -594,7 +611,38 @@ def get_users(*args, **kwargs):
     return con.get_users(*args, **kwargs)
 
 
+def get_user_by_name(*args, **kwargs):
+    """Get user by name using GraphQl.
+
+    Only administrators and managers can fetch all users. For other users
+        it is required to pass in 'project_name' filter.
+
+    Args:
+        username (str): Username.
+        project_name (Optional[str]): Define scope of project.
+        fields (Optional[Iterable[str]]): Fields to be queried
+            for users.
+
+    Returns:
+        Union[dict[str, Any], None]: User info or None if user is not
+            found.
+
+    """
+    con = get_server_api_connection()
+    return con.get_user_by_name(*args, **kwargs)
+
+
 def get_user(*args, **kwargs):
+    """Get user info using REST endpoit.
+
+    Args:
+        username (Optional[str]): Username.
+
+    Returns:
+        Union[dict[str, Any], None]: User info or None if user is not
+            found.
+
+    """
     con = get_server_api_connection()
     return con.get_user(*args, **kwargs)
 
@@ -788,6 +836,32 @@ def enroll_event_job(*args, **kwargs):
     return con.enroll_event_job(*args, **kwargs)
 
 
+def download_file_to_stream(*args, **kwargs):
+    """Download file from AYON server to IOStream.
+
+    Endpoint can be full url (must start with 'base_url' of api object).
+
+    Progress object can be used to track download. Can be used when
+    download happens in thread and other thread want to catch changes over
+    time.
+
+    Todos:
+        Use retries and timeout.
+        Return RestApiResponse.
+
+    Args:
+        endpoint (str): Endpoint or URL to file that should be downloaded.
+        stream (Union[io.BytesIO, BinaryIO]): Stream where output will be stored.
+        chunk_size (Optional[int]): Size of chunks that are received
+            in single loop.
+        progress (Optional[TransferProgress]): Object that gives ability
+            to track download progress.
+
+    """
+    con = get_server_api_connection()
+    return con.download_file_to_stream(*args, **kwargs)
+
+
 def download_file(*args, **kwargs):
     """Download file from AYON server.
 
@@ -812,6 +886,31 @@ def download_file(*args, **kwargs):
     """
     con = get_server_api_connection()
     return con.download_file(*args, **kwargs)
+
+
+def upload_file_from_stream(*args, **kwargs):
+    """Upload file to server from bytes.
+
+    Todos:
+        Use retries and timeout.
+        Return RestApiResponse.
+
+    Args:
+        endpoint (str): Endpoint or url where file will be uploaded.
+        stream (Union[io.BytesIO, BinaryIO]): File content stream.
+        progress (Optional[TransferProgress]): Object that gives ability
+            to track upload progress.
+        request_type (Optional[RequestType]): Type of request that will
+            be used to upload file.
+        **kwargs (Any): Additional arguments that will be passed
+            to request function.
+
+    Returns:
+        requests.Response: Response object
+
+    """
+    con = get_server_api_connection()
+    return con.upload_file_from_stream(*args, **kwargs)
 
 
 def upload_file(*args, **kwargs):
@@ -2692,8 +2791,8 @@ def get_products(*args, **kwargs):
         fields (Optional[Iterable[str]]): Fields to be queried for
             folder. All possible folder fields are returned
             if 'None' is passed.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            products.
 
     Returns:
         Generator[dict[str, Any]]: Queried product entities.
@@ -2712,8 +2811,8 @@ def get_product_by_id(*args, **kwargs):
         product_id (str): Product id.
         fields (Optional[Iterable[str]]): Fields that should be returned.
             All fields are returned if 'None' is passed.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            products.
 
     Returns:
         Union[dict, None]: Product entity data or None if was not found.
@@ -2733,8 +2832,8 @@ def get_product_by_name(*args, **kwargs):
         folder_id (str): Folder id (Folder is a parent of products).
         fields (Optional[Iterable[str]]): Fields that should be returned.
             All fields are returned if 'None' is passed.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            products.
 
     Returns:
         Union[dict, None]: Product entity data or None if was not found.
@@ -2886,8 +2985,8 @@ def get_versions(*args, **kwargs):
         fields (Optional[Iterable[str]]): Fields to be queried
             for version. All possible folder fields are returned
             if 'None' is passed.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            versions.
 
     Returns:
         Generator[dict[str, Any]]: Queried version entities.
@@ -2906,8 +3005,8 @@ def get_version_by_id(*args, **kwargs):
         version_id (str): Version id.
         fields (Optional[Iterable[str]]): Fields that should be returned.
             All fields are returned if 'None' is passed.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            versions.
 
     Returns:
         Union[dict, None]: Version entity data or None if was not found.
@@ -2927,8 +3026,8 @@ def get_version_by_name(*args, **kwargs):
         product_id (str): Product id. Product is a parent of version.
         fields (Optional[Iterable[str]]): Fields that should be returned.
             All fields are returned if 'None' is passed.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            versions.
 
     Returns:
         Union[dict, None]: Version entity data or None if was not found.
@@ -2947,8 +3046,8 @@ def get_hero_version_by_id(*args, **kwargs):
         version_id (int): Hero version id.
         fields (Optional[Iterable[str]]): Fields that should be returned.
             All fields are returned if 'None' is passed.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            versions.
 
     Returns:
         Union[dict, None]: Version entity data or None if was not found.
@@ -2969,8 +3068,8 @@ def get_hero_version_by_product_id(*args, **kwargs):
         product_id (int): Product id.
         fields (Optional[Iterable[str]]): Fields that should be returned.
             All fields are returned if 'None' is passed.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            versions.
 
     Returns:
         Union[dict, None]: Version entity data or None if was not found.
@@ -2994,8 +3093,8 @@ def get_hero_versions(*args, **kwargs):
             Both are returned when 'None' is passed.
         fields (Optional[Iterable[str]]): Fields that should be returned.
             All fields are returned if 'None' is passed.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            versions.
 
     Returns:
         Union[dict, None]: Version entity data or None if was not found.
@@ -3015,8 +3114,8 @@ def get_last_versions(*args, **kwargs):
             Both are returned when 'None' is passed.
         fields (Optional[Iterable[str]]): fields to be queried
             for representations.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            versions.
 
     Returns:
         dict[str, dict[str, Any]]: Last versions by product id.
@@ -3036,8 +3135,8 @@ def get_last_version_by_product_id(*args, **kwargs):
             Both are returned when 'None' is passed.
         fields (Optional[Iterable[str]]): fields to be queried
             for representations.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            versions.
 
     Returns:
         Union[dict[str, Any], None]: Queried version entity or None.
@@ -3058,8 +3157,8 @@ def get_last_version_by_product_name(*args, **kwargs):
             Both are returned when 'None' is passed.
         fields (Optional[Iterable[str]]): fields to be queried
             for representations.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            representations.
 
     Returns:
         Union[dict[str, Any], None]: Queried version entity or None.
@@ -3182,8 +3281,8 @@ def get_representations(*args, **kwargs):
         fields (Optional[Iterable[str]]): Fields to be queried for
             representation. All possible fields are returned if 'None' is
             passed.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            representations.
 
     Returns:
         Generator[dict[str, Any]]: Queried representation entities.
@@ -3201,8 +3300,8 @@ def get_representation_by_id(*args, **kwargs):
         representation_id (str): Id of representation.
         fields (Optional[Iterable[str]]): fields to be queried
             for representations.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            representations.
 
     Returns:
         Union[dict[str, Any], None]: Queried representation entity or None.
@@ -3221,8 +3320,8 @@ def get_representation_by_name(*args, **kwargs):
         version_id (str): Version id.
         fields (Optional[Iterable[str]]): fields to be queried
             for representations.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            representations.
 
     Returns:
         Union[dict[str, Any], None]: Queried representation entity or None.
@@ -3232,14 +3331,71 @@ def get_representation_by_name(*args, **kwargs):
     return con.get_representation_by_name(*args, **kwargs)
 
 
+def get_representations_hierarchy(*args, **kwargs):
+    """Find representation with parents by representation id.
+
+    Representation entity with parent entities up to project.
+
+    Default fields are used when any fields are set to `None`. But it is
+        possible to pass in empty iterable (list, set, tuple) to skip
+        entity.
+
+    Args:
+        project_name (str): Project where to look for entities.
+        representation_ids (Iterable[str]): Representation ids.
+        project_fields (Optional[Iterable[str]]): Project fields.
+        folder_fields (Optional[Iterable[str]]): Folder fields.
+        task_fields (Optional[Iterable[str]]): Task fields.
+        product_fields (Optional[Iterable[str]]): Product fields.
+        version_fields (Optional[Iterable[str]]): Version fields.
+        representation_fields (Optional[Iterable[str]]): Representation
+            fields.
+
+    Returns:
+        dict[str, RepresentationHierarchy]: Parent entities by
+            representation id.
+
+    """
+    con = get_server_api_connection()
+    return con.get_representations_hierarchy(*args, **kwargs)
+
+
+def get_representation_hierarchy(*args, **kwargs):
+    """Find representation parents by representation id.
+
+    Representation parent entities up to project.
+
+    Args:
+        project_name (str): Project where to look for entities.
+        representation_id (str): Representation id.
+        project_fields (Optional[Iterable[str]]): Project fields.
+        folder_fields (Optional[Iterable[str]]): Folder fields.
+        task_fields (Optional[Iterable[str]]): Task fields.
+        product_fields (Optional[Iterable[str]]): Product fields.
+        version_fields (Optional[Iterable[str]]): Version fields.
+        representation_fields (Optional[Iterable[str]]): Representation
+            fields.
+
+    Returns:
+        RepresentationHierarchy: Representation hierarchy entities.
+
+    """
+    con = get_server_api_connection()
+    return con.get_representation_hierarchy(*args, **kwargs)
+
+
 def get_representations_parents(*args, **kwargs):
     """Find representations parents by representation id.
 
     Representation parent entities up to project.
 
     Args:
-         project_name (str): Project where to look for entities.
-         representation_ids (Iterable[str]): Representation ids.
+        project_name (str): Project where to look for entities.
+        representation_ids (Iterable[str]): Representation ids.
+        project_fields (Optional[Iterable[str]]): Project fields.
+        folder_fields (Optional[Iterable[str]]): Folder fields.
+        product_fields (Optional[Iterable[str]]): Product fields.
+        version_fields (Optional[Iterable[str]]): Version fields.
 
     Returns:
         dict[str, RepresentationParents]: Parent entities by
@@ -3256,8 +3412,12 @@ def get_representation_parents(*args, **kwargs):
     Representation parent entities up to project.
 
     Args:
-         project_name (str): Project where to look for entities.
-         representation_id (str): Representation id.
+        project_name (str): Project where to look for entities.
+        representation_id (str): Representation id.
+        project_fields (Optional[Iterable[str]]): Project fields.
+        folder_fields (Optional[Iterable[str]]): Folder fields.
+        product_fields (Optional[Iterable[str]]): Product fields.
+        version_fields (Optional[Iterable[str]]): Version fields.
 
     Returns:
         RepresentationParents: Representation parent entities.
@@ -3391,8 +3551,8 @@ def get_workfiles_info(*args, **kwargs):
         fields (Optional[Iterable[str]]): Fields to be queried for
             representation. All possible fields are returned if 'None' is
             passed.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            workfiles.
 
     Returns:
         Generator[dict[str, Any]]: Queried workfile info entites.
@@ -3412,8 +3572,8 @@ def get_workfile_info(*args, **kwargs):
         fields (Optional[Iterable[str]]): Fields to be queried for
             representation. All possible fields are returned if 'None' is
             passed.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            workfiles.
 
     Returns:
         Union[dict[str, Any], None]: Workfile info entity or None.
@@ -3432,8 +3592,8 @@ def get_workfile_info_by_id(*args, **kwargs):
         fields (Optional[Iterable[str]]): Fields to be queried for
             representation. All possible fields are returned if 'None' is
             passed.
-        own_attributes (Optional[bool]): Attribute values that are
-            not explicitly set on entity will have 'None' value.
+        own_attributes (Optional[bool]): DEPRECATED: Not supported for
+            workfiles.
 
     Returns:
         Union[dict[str, Any], None]: Workfile info entity or None.
