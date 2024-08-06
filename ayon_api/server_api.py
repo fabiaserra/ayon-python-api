@@ -16,8 +16,6 @@ import uuid
 import warnings
 from contextlib import contextmanager
 
-import six
-
 try:
     from http import HTTPStatus
 except ImportError:
@@ -64,7 +62,7 @@ from .graphql_queries import (
     products_graphql_query,
     versions_graphql_query,
     representations_graphql_query,
-    representations_parents_qraphql_query,
+    representations_hierarchy_qraphql_query,
     workfiles_info_graphql_query,
     events_graphql_query,
     users_graphql_query,
@@ -80,6 +78,7 @@ from .exceptions import (
 )
 from .utils import (
     RepresentationParents,
+    RepresentationHierarchy,
     prepare_query_string,
     logout_from_server,
     create_entity_id,
@@ -91,6 +90,7 @@ from .utils import (
     get_default_settings_variant,
     get_default_site_id,
     NOT_SET,
+    get_media_mime_type,
 )
 
 PatternType = type(re.compile(""))
@@ -100,6 +100,7 @@ PROJECT_NAME_ALLOWED_SYMBOLS = "a-zA-Z0-9_"
 PROJECT_NAME_REGEX = re.compile(
     "^[{}]+$".format(PROJECT_NAME_ALLOWED_SYMBOLS)
 )
+_PLACEHOLDER = object()
 
 VERSION_REGEX = re.compile(
     r"(?P<major>0|[1-9]\d*)"
@@ -617,6 +618,17 @@ class ServerAPI(object):
         """
         return self._access_token
 
+    def is_service_user(self):
+        """Check if connection is using service API key.
+
+        Returns:
+            bool: Used api key belongs to service user.
+
+        """
+        if not self.has_valid_token:
+            raise ValueError("User is not logged in.")
+        return bool(self._access_token_is_service)
+
     def get_site_id(self):
         """Site id used for connection.
 
@@ -1017,12 +1029,16 @@ class ServerAPI(object):
         self._access_token_is_service = None
         return None
 
-    def get_users(self, usernames=None, fields=None):
+    def get_users(self, project_name=None, usernames=None, fields=None):
         """Get Users.
 
+        Only administrators and managers can fetch all users. For other users
+            it is required to pass in 'project_name' filter.
+
         Args:
+            project_name (Optional[str]): Project name.
             usernames (Optional[Iterable[str]]): Filter by usernames.
-            fields (Optional[Iterable[str]]): fields to be queried
+            fields (Optional[Iterable[str]]): Fields to be queried
                 for users.
 
         Returns:
@@ -1035,6 +1051,9 @@ class ServerAPI(object):
             if not usernames:
                 return
             filters["userNames"] = list(usernames)
+
+        if project_name is not None:
+            filters["projectName"] = project_name
 
         if not fields:
             fields = self.get_default_fields_for_type("user")
@@ -1049,7 +1068,45 @@ class ServerAPI(object):
                     user["accessGroups"])
                 yield user
 
+    def get_user_by_name(self, username, project_name=None, fields=None):
+        """Get user by name using GraphQl.
+
+        Only administrators and managers can fetch all users. For other users
+            it is required to pass in 'project_name' filter.
+
+        Args:
+            username (str): Username.
+            project_name (Optional[str]): Define scope of project.
+            fields (Optional[Iterable[str]]): Fields to be queried
+                for users.
+
+        Returns:
+            Union[dict[str, Any], None]: User info or None if user is not
+                found.
+
+        """
+        if not username:
+            return None
+
+        for user in self.get_users(
+            project_name=project_name,
+            usernames={username},
+            fields=fields,
+        ):
+            return user
+        return None
+
     def get_user(self, username=None):
+        """Get user info using REST endpoit.
+
+        Args:
+            username (Optional[str]): Username.
+
+        Returns:
+            Union[dict[str, Any], None]: User info or None if user is not
+                found.
+
+        """
         if username is None:
             output = self._get_user_info()
             if output is None:
@@ -1596,17 +1653,19 @@ class ServerAPI(object):
         response = self.post("enroll", **kwargs)
         if response.status_code == 204:
             return None
-        elif response.status_code >= 400:
+
+        if response.status_code == 503:
+            # Server is busy
+            self.log.info("Server is busy. Can't enroll event now.")
+            return None
+
+        if response.status_code >= 400:
             self.log.error(response.text)
             return None
 
         return response.data
 
-    def _download_file(self, url, filepath, chunk_size, progress):
-        dst_directory = os.path.dirname(filepath)
-        if not os.path.exists(dst_directory):
-            os.makedirs(dst_directory)
-
+    def _download_file_to_stream(self, url, stream, chunk_size, progress):
         kwargs = {"stream": True}
         if self._session is None:
             kwargs["headers"] = self.get_headers()
@@ -1614,13 +1673,64 @@ class ServerAPI(object):
         else:
             get_func = self._session_functions_mapping[RequestTypes.get]
 
-        with open(filepath, "wb") as f_stream:
-            with get_func(url, **kwargs) as response:
-                response.raise_for_status()
-                progress.set_content_size(response.headers["Content-length"])
-                for chunk in response.iter_content(chunk_size=chunk_size):
-                    f_stream.write(chunk)
-                    progress.add_transferred_chunk(len(chunk))
+        with get_func(url, **kwargs) as response:
+            response.raise_for_status()
+            progress.set_content_size(response.headers["Content-length"])
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                stream.write(chunk)
+                progress.add_transferred_chunk(len(chunk))
+
+    def download_file_to_stream(
+        self, endpoint, stream, chunk_size=None, progress=None
+    ):
+        """Download file from AYON server to IOStream.
+
+        Endpoint can be full url (must start with 'base_url' of api object).
+
+        Progress object can be used to track download. Can be used when
+        download happens in thread and other thread want to catch changes over
+        time.
+
+        Todos:
+            Use retries and timeout.
+            Return RestApiResponse.
+
+        Args:
+            endpoint (str): Endpoint or URL to file that should be downloaded.
+            stream (Union[io.BytesIO, BinaryIO]): Stream where output will be stored.
+            chunk_size (Optional[int]): Size of chunks that are received
+                in single loop.
+            progress (Optional[TransferProgress]): Object that gives ability
+                to track download progress.
+
+        """
+        if not chunk_size:
+            chunk_size = self.default_download_chunk_size
+
+        if endpoint.startswith(self._base_url):
+            url = endpoint
+        else:
+            endpoint = endpoint.lstrip("/").rstrip("/")
+            url = "{}/{}".format(self._rest_url, endpoint)
+
+        if progress is None:
+            progress = TransferProgress()
+
+        progress.set_source_url(url)
+        progress.set_started()
+
+        try:
+            self._download_file_to_stream(
+                url, stream, chunk_size, progress
+            )
+
+        except Exception as exc:
+            progress.set_failed(str(exc))
+            raise
+
+        finally:
+            progress.set_transfer_done()
+        return progress
 
     def download_file(
         self, endpoint, filepath, chunk_size=None, progress=None
@@ -1646,32 +1756,26 @@ class ServerAPI(object):
                 to track download progress.
 
         """
-        if not chunk_size:
-            chunk_size = self.default_download_chunk_size
-
-        if endpoint.startswith(self._base_url):
-            url = endpoint
-        else:
-            endpoint = endpoint.lstrip("/").rstrip("/")
-            url = "{}/{}".format(self._rest_url, endpoint)
-
         # Create dummy object so the function does not have to check
         #   'progress' variable everywhere
         if progress is None:
             progress = TransferProgress()
 
-        progress.set_source_url(url)
         progress.set_destination_url(filepath)
-        progress.set_started()
+
+        dst_directory = os.path.dirname(filepath)
+        os.makedirs(dst_directory, exist_ok=True)
+
         try:
-            self._download_file(url, filepath, chunk_size, progress)
+            with open(filepath, "wb") as stream:
+                self.download_file_to_stream(
+                    endpoint, stream, chunk_size, progress
+                )
 
         except Exception as exc:
             progress.set_failed(str(exc))
             raise
 
-        finally:
-            progress.set_transfer_done()
         return progress
 
     @staticmethod
@@ -1679,7 +1783,7 @@ class ServerAPI(object):
         """Generator that yields chunks of file.
 
         Args:
-            file_stream (io.BinaryIO): Byte stream.
+            file_stream (Union[io.BytesIO, BinaryIO]): Byte stream.
             progress (TransferProgress): Object to track upload progress.
             chunk_size (int): Size of chunks that are uploaded at once.
 
@@ -1704,7 +1808,7 @@ class ServerAPI(object):
     def _upload_file(
         self,
         url,
-        filepath,
+        stream,
         progress,
         request_type=None,
         chunk_size=None,
@@ -1714,7 +1818,7 @@ class ServerAPI(object):
 
         Args:
             url (str): Url where file will be uploaded.
-            filepath (str): Source filepath.
+            stream (Union[io.BytesIO, BinaryIO]): File stream.
             progress (TransferProgress): Object that gives ability to track
                 progress.
             request_type (Optional[RequestType]): Type of request that will
@@ -1743,15 +1847,63 @@ class ServerAPI(object):
         if not chunk_size:
             chunk_size = self.default_upload_chunk_size
 
-        with open(filepath, "rb") as stream:
-            response = post_func(
-                url,
-                data=self._upload_chunks_iter(stream, progress, chunk_size),
-                **kwargs
-            )
+        response = post_func(
+            url,
+            data=self._upload_chunks_iter(stream, progress, chunk_size),
+            **kwargs
+        )
 
         response.raise_for_status()
         return response
+
+    def upload_file_from_stream(
+        self, endpoint, stream, progress, request_type, **kwargs
+    ):
+        """Upload file to server from bytes.
+
+        Todos:
+            Use retries and timeout.
+            Return RestApiResponse.
+
+        Args:
+            endpoint (str): Endpoint or url where file will be uploaded.
+            stream (Union[io.BytesIO, BinaryIO]): File content stream.
+            progress (Optional[TransferProgress]): Object that gives ability
+                to track upload progress.
+            request_type (Optional[RequestType]): Type of request that will
+                be used to upload file.
+            **kwargs (Any): Additional arguments that will be passed
+                to request function.
+
+        Returns:
+            requests.Response: Response object
+
+        """
+        if endpoint.startswith(self._base_url):
+            url = endpoint
+        else:
+            endpoint = endpoint.lstrip("/").rstrip("/")
+            url = "{}/{}".format(self._rest_url, endpoint)
+
+        # Create dummy object so the function does not have to check
+        #   'progress' variable everywhere
+        if progress is None:
+            progress = TransferProgress()
+
+        progress.set_destination_url(url)
+        progress.set_started()
+
+        try:
+            return self._upload_file(
+                url, stream, progress, request_type, **kwargs
+            )
+
+        except Exception as exc:
+            progress.set_failed(str(exc))
+            raise
+
+        finally:
+            progress.set_transfer_done()
 
     def upload_file(
         self, endpoint, filepath, progress=None, request_type=None, **kwargs
@@ -1776,32 +1928,86 @@ class ServerAPI(object):
             requests.Response: Response object
         
         """
-        if endpoint.startswith(self._base_url):
-            url = endpoint
-        else:
-            endpoint = endpoint.lstrip("/").rstrip("/")
-            url = "{}/{}".format(self._rest_url, endpoint)
-
-        # Create dummy object so the function does not have to check
-        #   'progress' variable everywhere
         if progress is None:
             progress = TransferProgress()
 
         progress.set_source_url(filepath)
-        progress.set_destination_url(url)
-        progress.set_started()
 
-        try:
-            return self._upload_file(
-                url, filepath, progress, request_type, **kwargs
+        with open(filepath, "rb") as stream:
+            return self.upload_file_from_stream(
+                endpoint, stream, progress, request_type, **kwargs
             )
 
-        except Exception as exc:
-            progress.set_failed(str(exc))
-            raise
+    def upload_reviewable(
+        self,
+        project_name,
+        version_id,
+        filepath,
+        label=None,
+        content_type=None,
+        filename=None,
+        progress=None,
+        headers=None,
+        **kwargs
+    ):
+        """Upload reviewable file to server.
 
-        finally:
-            progress.set_transfer_done()
+        Args:
+            project_name (str): Project name.
+            version_id (str): Version id.
+            filepath (str): Reviewable file path to upload.
+            label (Optional[str]): Reviewable label. Filled automatically
+                server side with filename.
+            content_type (Optional[str]): MIME type of the file.
+            filename (Optional[str]): User as original filename. Filename from
+                'filepath' is used when not filled.
+            progress (Optional[TransferProgress]): Progress.
+            headers (Optional[Dict[str, Any]]): Headers.
+
+        Returns:
+            RestApiResponse: Server response.
+
+        """
+        if not content_type:
+            content_type = get_media_mime_type(filepath)
+
+        if not content_type:
+            raise ValueError(
+                f"Could not determine MIME type of file '{filepath}'"
+            )
+
+        if headers is None:
+            headers = self.get_headers(content_type)
+        else:
+            # Make sure content-type is filled with file content type
+            content_type_key = next(
+                (
+                    key
+                    for key in headers
+                    if key.lower() == "content-type"
+                ),
+                "Content-Type"
+            )
+            headers[content_type_key] = content_type
+
+        # Fill original filename if not explicitly defined
+        if not filename:
+            filename = os.path.basename(filepath)
+        headers["x-file-name"] = filename
+
+        query = f"?label={label}" if label else ""
+        endpoint = (
+            f"/projects/{project_name}"
+            f"/versions/{version_id}/reviewables{query}"
+        )
+        return self.upload_file(
+            endpoint,
+            filepath,
+            progress=progress,
+            headers=headers,
+            request_type=RequestTypes.post,
+            **kwargs
+        )
 
     def trigger_server_restart(self):
         """Trigger server restart.
@@ -2153,8 +2359,7 @@ class ServerAPI(object):
         dst_filepath = os.path.join(destination_dir, destination_filename)
         # Filename can contain "subfolders"
         dst_dirpath = os.path.dirname(dst_filepath)
-        if not os.path.exists(dst_dirpath):
-            os.makedirs(dst_dirpath)
+        os.makedirs(dst_dirpath, exist_ok=True)
 
         url = self.get_addon_url(
             addon_name,
@@ -4911,7 +5116,7 @@ class ServerAPI(object):
         response.raise_for_status()
 
     def _filter_product(
-        self, project_name, product, active, own_attributes, use_rest
+        self, project_name, product, active, use_rest
     ):
         if active is not None and product["active"] is not active:
             return None
@@ -4920,9 +5125,6 @@ class ServerAPI(object):
             product = self.get_rest_product(project_name, product["id"])
         else:
             self._convert_entity_data(product)
-
-        if own_attributes:
-            fill_own_attribs(product)
 
         return product
 
@@ -4940,7 +5142,7 @@ class ServerAPI(object):
         tags=None,
         active=True,
         fields=None,
-        own_attributes=False
+        own_attributes=_PLACEHOLDER
     ):
         """Query products from server.
 
@@ -4971,8 +5173,8 @@ class ServerAPI(object):
             fields (Optional[Iterable[str]]): Fields to be queried for
                 folder. All possible folder fields are returned
                 if 'None' is passed.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                products.
 
         Returns:
             Generator[dict[str, Any]]: Queried product entities.
@@ -5025,8 +5227,12 @@ class ServerAPI(object):
         if active is not None:
             fields.add("active")
 
-        if own_attributes:
-            fields.add("ownAttrib")
+        if own_attributes is not _PLACEHOLDER:
+            warnings.warn(
+                "'own_attributes' is not supported for products. The argument"
+                " will be removed form function signature in future"
+                " (apx. version 1.0.10 or 1.1.0)."
+            )
 
         # Add 'name' and 'folderId' if 'names_by_folder_ids' filter is entered
         if names_by_folder_ids:
@@ -5086,7 +5292,7 @@ class ServerAPI(object):
             products_by_folder_id = collections.defaultdict(list)
             for product in products:
                 filtered_product = self._filter_product(
-                    project_name, product, active, own_attributes, use_rest
+                    project_name, product, active, use_rest
                 )
                 if filtered_product is not None:
                     folder_id = filtered_product["folderId"]
@@ -5100,7 +5306,7 @@ class ServerAPI(object):
         else:
             for product in products:
                 filtered_product = self._filter_product(
-                    project_name, product, active, own_attributes, use_rest
+                    project_name, product, active, use_rest
                 )
                 if filtered_product is not None:
                     yield filtered_product
@@ -5110,7 +5316,7 @@ class ServerAPI(object):
         project_name,
         product_id,
         fields=None,
-        own_attributes=False
+        own_attributes=_PLACEHOLDER
     ):
         """Query product entity by id.
 
@@ -5120,8 +5326,8 @@ class ServerAPI(object):
             product_id (str): Product id.
             fields (Optional[Iterable[str]]): Fields that should be returned.
                 All fields are returned if 'None' is passed.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                products.
 
         Returns:
             Union[dict, None]: Product entity data or None if was not found.
@@ -5144,7 +5350,7 @@ class ServerAPI(object):
         product_name,
         folder_id,
         fields=None,
-        own_attributes=False
+        own_attributes=_PLACEHOLDER
     ):
         """Query product entity by name and folder id.
 
@@ -5155,8 +5361,8 @@ class ServerAPI(object):
             folder_id (str): Folder id (Folder is a parent of products).
             fields (Optional[Iterable[str]]): Fields that should be returned.
                 All fields are returned if 'None' is passed.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                products.
 
         Returns:
             Union[dict, None]: Product entity data or None if was not found.
@@ -5392,7 +5598,7 @@ class ServerAPI(object):
         tags=None,
         active=True,
         fields=None,
-        own_attributes=False
+        own_attributes=_PLACEHOLDER
     ):
         """Get version entities based on passed filters from server.
 
@@ -5418,8 +5624,8 @@ class ServerAPI(object):
             fields (Optional[Iterable[str]]): Fields to be queried
                 for version. All possible folder fields are returned
                 if 'None' is passed.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                versions.
 
         Returns:
             Generator[dict[str, Any]]: Queried version entities.
@@ -5444,8 +5650,12 @@ class ServerAPI(object):
         if active is not None:
             fields.add("active")
 
-        if own_attributes:
-            fields.add("ownAttrib")
+        if own_attributes is not _PLACEHOLDER:
+            warnings.warn(
+                "'own_attributes' is not supported for versions. The argument"
+                " will be removed form function signature in future"
+                " (apx. version 1.0.10 or 1.1.0)."
+            )
 
         filters = {
             "projectName": project_name
@@ -5532,9 +5742,6 @@ class ServerAPI(object):
                     else:
                         self._convert_entity_data(version)
 
-                    if own_attributes:
-                        fill_own_attribs(version)
-
                     yield version
 
     def get_version_by_id(
@@ -5542,7 +5749,7 @@ class ServerAPI(object):
         project_name,
         version_id,
         fields=None,
-        own_attributes=False
+        own_attributes=_PLACEHOLDER
     ):
         """Query version entity by id.
 
@@ -5552,8 +5759,8 @@ class ServerAPI(object):
             version_id (str): Version id.
             fields (Optional[Iterable[str]]): Fields that should be returned.
                 All fields are returned if 'None' is passed.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                versions.
 
         Returns:
             Union[dict, None]: Version entity data or None if was not found.
@@ -5577,7 +5784,7 @@ class ServerAPI(object):
         version,
         product_id,
         fields=None,
-        own_attributes=False
+        own_attributes=_PLACEHOLDER
     ):
         """Query version entity by version and product id.
 
@@ -5588,8 +5795,8 @@ class ServerAPI(object):
             product_id (str): Product id. Product is a parent of version.
             fields (Optional[Iterable[str]]): Fields that should be returned.
                 All fields are returned if 'None' is passed.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                versions.
 
         Returns:
             Union[dict, None]: Version entity data or None if was not found.
@@ -5612,7 +5819,7 @@ class ServerAPI(object):
         project_name,
         version_id,
         fields=None,
-        own_attributes=False
+        own_attributes=_PLACEHOLDER
     ):
         """Query hero version entity by id.
 
@@ -5622,8 +5829,8 @@ class ServerAPI(object):
             version_id (int): Hero version id.
             fields (Optional[Iterable[str]]): Fields that should be returned.
                 All fields are returned if 'None' is passed.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                versions.
 
         Returns:
             Union[dict, None]: Version entity data or None if was not found.
@@ -5644,7 +5851,7 @@ class ServerAPI(object):
         project_name,
         product_id,
         fields=None,
-        own_attributes=False
+        own_attributes=_PLACEHOLDER
     ):
         """Query hero version entity by product id.
 
@@ -5656,8 +5863,8 @@ class ServerAPI(object):
             product_id (int): Product id.
             fields (Optional[Iterable[str]]): Fields that should be returned.
                 All fields are returned if 'None' is passed.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                versions.
 
         Returns:
             Union[dict, None]: Version entity data or None if was not found.
@@ -5680,7 +5887,7 @@ class ServerAPI(object):
         version_ids=None,
         active=True,
         fields=None,
-        own_attributes=False
+        own_attributes=_PLACEHOLDER
     ):
         """Query hero versions by multiple filters.
 
@@ -5695,8 +5902,8 @@ class ServerAPI(object):
                 Both are returned when 'None' is passed.
             fields (Optional[Iterable[str]]): Fields that should be returned.
                 All fields are returned if 'None' is passed.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                versions.
 
         Returns:
             Union[dict, None]: Version entity data or None if was not found.
@@ -5719,7 +5926,7 @@ class ServerAPI(object):
         product_ids,
         active=True,
         fields=None,
-        own_attributes=False
+        own_attributes=_PLACEHOLDER
     ):
         """Query last version entities by product ids.
 
@@ -5730,8 +5937,8 @@ class ServerAPI(object):
                 Both are returned when 'None' is passed.
             fields (Optional[Iterable[str]]): fields to be queried
                 for representations.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                versions.
 
         Returns:
             dict[str, dict[str, Any]]: Last versions by product id.
@@ -5761,7 +5968,7 @@ class ServerAPI(object):
         product_id,
         active=True,
         fields=None,
-        own_attributes=False
+        own_attributes=_PLACEHOLDER
     ):
         """Query last version entity by product id.
 
@@ -5772,8 +5979,8 @@ class ServerAPI(object):
                 Both are returned when 'None' is passed.
             fields (Optional[Iterable[str]]): fields to be queried
                 for representations.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                versions.
 
         Returns:
             Union[dict[str, Any], None]: Queried version entity or None.
@@ -5799,7 +6006,7 @@ class ServerAPI(object):
         folder_id,
         active=True,
         fields=None,
-        own_attributes=False
+        own_attributes=_PLACEHOLDER
     ):
         """Query last version entity by product name and folder id.
 
@@ -5811,8 +6018,8 @@ class ServerAPI(object):
                 Both are returned when 'None' is passed.
             fields (Optional[Iterable[str]]): fields to be queried
                 for representations.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                representations.
 
         Returns:
             Union[dict[str, Any], None]: Queried version entity or None.
@@ -6037,7 +6244,7 @@ class ServerAPI(object):
         active=True,
         has_links=None,
         fields=None,
-        own_attributes=False
+        own_attributes=_PLACEHOLDER
     ):
         """Get representation entities based on passed filters from server.
 
@@ -6068,8 +6275,8 @@ class ServerAPI(object):
             fields (Optional[Iterable[str]]): Fields to be queried for
                 representation. All possible fields are returned if 'None' is
                 passed.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                representations.
 
         Returns:
             Generator[dict[str, Any]]: Queried representation entities.
@@ -6093,8 +6300,12 @@ class ServerAPI(object):
         if active is not None:
             fields.add("active")
 
-        if own_attributes:
-            fields.add("ownAttrib")
+        if own_attributes is not _PLACEHOLDER:
+            warnings.warn(
+                "'own_attributes' is not supported for representations. "
+                "The argument will be removed form function signature in "
+                "future (apx. version 1.0.10 or 1.1.0)."
+            )
 
         if "files" in fields:
             fields.discard("files")
@@ -6173,8 +6384,6 @@ class ServerAPI(object):
 
                 self._representation_conversion(repre)
 
-                if own_attributes:
-                    fill_own_attribs(repre)
                 yield repre
 
     def get_representation_by_id(
@@ -6182,7 +6391,7 @@ class ServerAPI(object):
         project_name,
         representation_id,
         fields=None,
-        own_attributes=False
+        own_attributes=_PLACEHOLDER
     ):
         """Query representation entity from server based on id filter.
 
@@ -6191,8 +6400,8 @@ class ServerAPI(object):
             representation_id (str): Id of representation.
             fields (Optional[Iterable[str]]): fields to be queried
                 for representations.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                representations.
 
         Returns:
             Union[dict[str, Any], None]: Queried representation entity or None.
@@ -6215,7 +6424,7 @@ class ServerAPI(object):
         representation_name,
         version_id,
         fields=None,
-        own_attributes=False
+        own_attributes=_PLACEHOLDER
     ):
         """Query representation entity by name and version id.
 
@@ -6225,8 +6434,8 @@ class ServerAPI(object):
             version_id (str): Version id.
             fields (Optional[Iterable[str]]): fields to be queried
                 for representations.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                representations.
 
         Returns:
             Union[dict[str, Any], None]: Queried representation entity or None.
@@ -6244,36 +6453,101 @@ class ServerAPI(object):
             return representation
         return None
 
-    def get_representations_parents(self, project_name, representation_ids):
-        """Find representations parents by representation id.
+    def get_representations_hierarchy(
+        self,
+        project_name,
+        representation_ids,
+        project_fields=None,
+        folder_fields=None,
+        task_fields=None,
+        product_fields=None,
+        version_fields=None,
+        representation_fields=None,
+    ):
+        """Find representation with parents by representation id.
 
-        Representation parent entities up to project.
+        Representation entity with parent entities up to project.
+
+        Default fields are used when any fields are set to `None`. But it is
+            possible to pass in empty iterable (list, set, tuple) to skip
+            entity.
 
         Args:
-             project_name (str): Project where to look for entities.
-             representation_ids (Iterable[str]): Representation ids.
+            project_name (str): Project where to look for entities.
+            representation_ids (Iterable[str]): Representation ids.
+            project_fields (Optional[Iterable[str]]): Project fields.
+            folder_fields (Optional[Iterable[str]]): Folder fields.
+            task_fields (Optional[Iterable[str]]): Task fields.
+            product_fields (Optional[Iterable[str]]): Product fields.
+            version_fields (Optional[Iterable[str]]): Version fields.
+            representation_fields (Optional[Iterable[str]]): Representation
+                fields.
 
         Returns:
-            dict[str, RepresentationParents]: Parent entities by
+            dict[str, RepresentationHierarchy]: Parent entities by
                 representation id.
 
         """
         if not representation_ids:
             return {}
 
-        project = self.get_project(project_name)
+        if project_fields is not None:
+            project_fields = set(project_fields)
+
+        project = {}
+        if project_fields is None:
+            project = self.get_project(project_name)
+
+        elif project_fields:
+            # Keep project as empty dictionary if does not have
+            #   filled any fields
+            project = self.get_project(
+                project_name, fields=project_fields
+            )
+
         repre_ids = set(representation_ids)
         output = {
-            repre_id: RepresentationParents(None, None, None, None)
+            repre_id: RepresentationHierarchy(
+                project, None, None, None, None, None
+            )
             for repre_id in representation_ids
         }
 
-        version_fields = self.get_default_fields_for_type("version")
-        product_fields = self.get_default_fields_for_type("product")
-        folder_fields = self.get_default_fields_for_type("folder")
+        if folder_fields is None:
+            folder_fields = self.get_default_fields_for_type("folder")
+        else:
+            folder_fields = set(folder_fields)
 
-        query = representations_parents_qraphql_query(
-            version_fields, product_fields, folder_fields
+        if task_fields is None:
+            task_fields = self.get_default_fields_for_type("task")
+        else:
+            task_fields = set(task_fields)
+
+        if product_fields is None:
+            product_fields = self.get_default_fields_for_type("product")
+        else:
+            product_fields = set(product_fields)
+
+        if version_fields is None:
+            version_fields = self.get_default_fields_for_type("version")
+        else:
+            version_fields = set(version_fields)
+
+        if representation_fields is None:
+            representation_fields = self.get_default_fields_for_type(
+                "representation"
+            )
+        else:
+            representation_fields = set(representation_fields)
+
+        representation_fields.add("id")
+
+        query = representations_hierarchy_qraphql_query(
+            folder_fields,
+            task_fields,
+            product_fields,
+            version_fields,
+            representation_fields,
         )
         query.set_variable_value("projectName", project_name)
         query.set_variable_value("representationIds", list(repre_ids))
@@ -6281,26 +6555,133 @@ class ServerAPI(object):
         parsed_data = query.query(self)
         for repre in parsed_data["project"]["representations"]:
             repre_id = repre["id"]
-            version = repre.pop("version")
-            product = version.pop("product")
-            folder = product.pop("folder")
+            version = repre.pop("version", {})
+            product = version.pop("product", {})
+            task = version.pop("task", None)
+            folder = product.pop("folder", {})
             self._convert_entity_data(version)
             self._convert_entity_data(product)
             self._convert_entity_data(folder)
-            output[repre_id] = RepresentationParents(
-                version, product, folder, project
+            if task:
+                self._convert_entity_data(task)
+
+            output[repre_id] = RepresentationHierarchy(
+                project, folder, task, product, version, repre
             )
 
         return output
 
-    def get_representation_parents(self, project_name, representation_id):
+    def get_representation_hierarchy(
+        self,
+        project_name,
+        representation_id,
+        project_fields=None,
+        folder_fields=None,
+        task_fields=None,
+        product_fields=None,
+        version_fields=None,
+        representation_fields=None,
+    ):
         """Find representation parents by representation id.
 
         Representation parent entities up to project.
 
         Args:
-             project_name (str): Project where to look for entities.
-             representation_id (str): Representation id.
+            project_name (str): Project where to look for entities.
+            representation_id (str): Representation id.
+            project_fields (Optional[Iterable[str]]): Project fields.
+            folder_fields (Optional[Iterable[str]]): Folder fields.
+            task_fields (Optional[Iterable[str]]): Task fields.
+            product_fields (Optional[Iterable[str]]): Product fields.
+            version_fields (Optional[Iterable[str]]): Version fields.
+            representation_fields (Optional[Iterable[str]]): Representation
+                fields.
+
+        Returns:
+            RepresentationHierarchy: Representation hierarchy entities.
+
+        """
+        if not representation_id:
+            return None
+
+        parents_by_repre_id = self.get_representations_hierarchy(
+            project_name,
+            [representation_id],
+            project_fields=project_fields,
+            folder_fields=folder_fields,
+            task_fields=task_fields,
+            product_fields=product_fields,
+            version_fields=version_fields,
+            representation_fields=representation_fields,
+        )
+        return parents_by_repre_id[representation_id]
+
+    def get_representations_parents(
+        self,
+        project_name,
+        representation_ids,
+        project_fields=None,
+        folder_fields=None,
+        product_fields=None,
+        version_fields=None,
+    ):
+        """Find representations parents by representation id.
+
+        Representation parent entities up to project.
+
+        Args:
+            project_name (str): Project where to look for entities.
+            representation_ids (Iterable[str]): Representation ids.
+            project_fields (Optional[Iterable[str]]): Project fields.
+            folder_fields (Optional[Iterable[str]]): Folder fields.
+            product_fields (Optional[Iterable[str]]): Product fields.
+            version_fields (Optional[Iterable[str]]): Version fields.
+
+        Returns:
+            dict[str, RepresentationParents]: Parent entities by
+                representation id.
+
+        """
+        hierarchy_by_repre_id = self.get_representations_hierarchy(
+            project_name,
+            representation_ids,
+            project_fields=project_fields,
+            folder_fields=folder_fields,
+            task_fields=set(),
+            product_fields=product_fields,
+            version_fields=version_fields,
+            representation_fields={"id"},
+        )
+        return {
+            repre_id: RepresentationParents(
+                hierarchy.version,
+                hierarchy.product,
+                hierarchy.folder,
+                hierarchy.project,
+            )
+            for repre_id, hierarchy in hierarchy_by_repre_id.items()
+        }
+
+    def get_representation_parents(
+        self,
+        project_name, 
+        representation_id,
+        project_fields=None,
+        folder_fields=None,
+        product_fields=None,
+        version_fields=None,
+    ):
+        """Find representation parents by representation id.
+
+        Representation parent entities up to project.
+
+        Args:
+            project_name (str): Project where to look for entities.
+            representation_id (str): Representation id.
+            project_fields (Optional[Iterable[str]]): Project fields.
+            folder_fields (Optional[Iterable[str]]): Folder fields.
+            product_fields (Optional[Iterable[str]]): Product fields.
+            version_fields (Optional[Iterable[str]]): Version fields.
 
         Returns:
             RepresentationParents: Representation parent entities.
@@ -6310,7 +6691,12 @@ class ServerAPI(object):
             return None
 
         parents_by_repre_id = self.get_representations_parents(
-            project_name, [representation_id]
+            project_name,
+            [representation_id],
+            project_fields=project_fields,
+            folder_fields=folder_fields,
+            product_fields=product_fields,
+            version_fields=version_fields,
         )
         return parents_by_repre_id[representation_id]
 
@@ -6541,7 +6927,7 @@ class ServerAPI(object):
         tags=None,
         has_links=None,
         fields=None,
-        own_attributes=False
+        own_attributes=_PLACEHOLDER
     ):
         """Workfile info entities by passed filters.
 
@@ -6560,8 +6946,8 @@ class ServerAPI(object):
             fields (Optional[Iterable[str]]): Fields to be queried for
                 representation. All possible fields are returned if 'None' is
                 passed.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                workfiles.
 
         Returns:
             Generator[dict[str, Any]]: Queried workfile info entites.
@@ -6614,8 +7000,13 @@ class ServerAPI(object):
                 "attrib.{}".format(attr)
                 for attr in self.get_attributes_for_type("workfile")
             }
-        if own_attributes:
-            fields.add("ownAttrib")
+        
+        if own_attributes is not _PLACEHOLDER:
+            warnings.warn(
+                "'own_attributes' is not supported for workfiles. The argument"
+                " will be removed form function signature in future"
+                " (apx. version 1.0.10 or 1.1.0)."
+            )
 
         query = workfiles_info_graphql_query(fields)
 
@@ -6624,12 +7015,15 @@ class ServerAPI(object):
 
         for parsed_data in query.continuous_query(self):
             for workfile_info in parsed_data["project"]["workfiles"]:
-                if own_attributes:
-                    fill_own_attribs(workfile_info)
                 yield workfile_info
 
     def get_workfile_info(
-        self, project_name, task_id, path, fields=None, own_attributes=False
+        self,
+        project_name,
+        task_id,
+        path,
+        fields=None,
+        own_attributes=_PLACEHOLDER
     ):
         """Workfile info entity by task id and workfile path.
 
@@ -6640,8 +7034,8 @@ class ServerAPI(object):
             fields (Optional[Iterable[str]]): Fields to be queried for
                 representation. All possible fields are returned if 'None' is
                 passed.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                workfiles.
 
         Returns:
             Union[dict[str, Any], None]: Workfile info entity or None.
@@ -6661,7 +7055,11 @@ class ServerAPI(object):
         return None
 
     def get_workfile_info_by_id(
-        self, project_name, workfile_id, fields=None, own_attributes=False
+        self,
+        project_name,
+        workfile_id,
+        fields=None,
+        own_attributes=_PLACEHOLDER
     ):
         """Workfile info entity by id.
 
@@ -6671,8 +7069,8 @@ class ServerAPI(object):
             fields (Optional[Iterable[str]]): Fields to be queried for
                 representation. All possible fields are returned if 'None' is
                 passed.
-            own_attributes (Optional[bool]): Attribute values that are
-                not explicitly set on entity will have 'None' value.
+            own_attributes (Optional[bool]): DEPRECATED: Not supported for
+                workfiles.
 
         Returns:
             Union[dict[str, Any], None]: Workfile info entity or None.
@@ -7814,11 +8212,11 @@ class ServerAPI(object):
         return op_results
 
     def _convert_entity_data(self, entity):
-        if not entity:
+        if not entity or "data" not in entity:
             return
-        entity_data = entity.get("data")
-        if (
-            entity_data is not None
-            and isinstance(entity_data, six.string_types)
-        ):
-            entity["data"] = json.loads(entity_data)
+
+        entity_data = entity["data"] or {}
+        if isinstance(entity_data, str):
+            entity_data = json.loads(entity_data)
+
+        entity["data"] = entity_data
