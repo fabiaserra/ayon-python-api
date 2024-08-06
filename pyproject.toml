@@ -1,5 +1,5 @@
 [project]
-name = "ayon-python-api"
+name = "ayon_api"
 version = "1.0.8-ax.1"
 description = "AYON Python API"
 license = {file = "LICENSE"}
