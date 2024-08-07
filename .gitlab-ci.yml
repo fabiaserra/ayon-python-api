@@ -9,7 +9,7 @@ get-version:
     - on-prem
   needs: []
   script:
-    - VERSION=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' pyproject.toml)
+    - VERSION=$(sed -n '/^version = "/{s/^version = "\([^"]*\)".*/\1/p; q}' pyproject.toml)
     - echo "VERSION=${VERSION}"
     - echo "VERSION=${VERSION}" > version_info.txt
   artifacts:
