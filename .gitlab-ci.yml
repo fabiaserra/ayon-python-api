@@ -2,7 +2,6 @@ stages:
   - init
   - tag
 
-
 get-version:
   stage: init
   image: alpine:latest
