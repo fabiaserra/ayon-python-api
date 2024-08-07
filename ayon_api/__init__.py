@@ -3,6 +3,10 @@ from .utils import (
     TransferProgress,
     slugify_string,
     create_dependency_package_basename,
+    get_user_by_token,
+    is_token_valid,
+    validate_url,
+    login_to_server,
 )
 from .server_api import (
     RequestTypes,
@@ -67,6 +71,7 @@ from ._api import (
     download_file,
     upload_file_from_stream,
     upload_file,
+    upload_reviewable,
     trigger_server_restart,
     query_graphql,
     get_graphql_schema,
@@ -229,6 +234,10 @@ __all__ = (
     "TransferProgress",
     "slugify_string",
     "create_dependency_package_basename",
+    "get_user_by_token",
+    "is_token_valid",
+    "validate_url",
+    "login_to_server",
 
     "RequestTypes",
     "ServerAPI",
@@ -290,6 +299,7 @@ __all__ = (
     "download_file",
     "upload_file_from_stream",
     "upload_file",
+    "upload_reviewable",
     "trigger_server_restart",
     "query_graphql",
     "get_graphql_schema",

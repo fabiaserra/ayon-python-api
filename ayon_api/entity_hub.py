@@ -2494,7 +2494,6 @@ class ProjectEntity(BaseEntity):
             task_types=project["taskTypes"],
             statuses=project["statuses"],
             name=project["name"],
-            statuses=project["statuses"],
             attribs=project["ownAttrib"],
             data=project["data"],
             active=project["active"],

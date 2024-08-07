@@ -1,0 +1,45 @@
+stages:
+  - init
+  - tag
+
+get-version:
+  stage: init
+  image: alpine:latest
+  tags:
+    - on-prem
+  needs: []
+  script:
+    - VERSION=$(sed -n '/^version = "/{s/^version = "\([^"]*\)".*/\1/p; q}' pyproject.toml)
+    - echo "VERSION=${VERSION}"
+    - echo "VERSION=${VERSION}" > version_info.txt
+  artifacts:
+    reports:
+      dotenv: version_info.txt
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: manual
+
+tag-version:
+  stage: tag
+  tags:
+    - on-prem
+  needs: ["get-version"]
+  dependencies:
+    - get-version
+  image: registry.gitlab.com/gitlab-org/release-cli:v0.18.0
+  script:
+    - >
+      if release-cli get --tag-name "${VERSION}"; then
+        echo "Release "${VERSION}" already exists, updating..."
+        release-cli update --description "Release ${VERSION} using CI pipeline $CI_PIPELINE_ID" --tag-name "${VERSION}"
+      else
+        echo "Release "${VERSION}" does not exist, creating..."
+        release-cli create --description "Release ${VERSION} using CI pipeline $CI_PIPELINE_ID" --tag-name "${VERSION}"
+      fi
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: manual
