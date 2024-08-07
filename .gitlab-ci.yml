@@ -12,7 +12,7 @@ get-version:
   script:
     - VERSION=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' pyproject.toml)
     - echo "VERSION=${VERSION}"
-    - echo "VERSION=${VERSION}" >> version_info.txt
+    - echo "VERSION=${VERSION}" > version_info.txt
   artifacts:
     reports:
       dotenv: version_info.txt
