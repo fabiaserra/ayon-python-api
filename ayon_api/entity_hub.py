@@ -226,9 +226,6 @@ class EntityHub(object):
                     self.project_name,
                     entity_id,
                     fields=self._get_version_fields(),
-                    own_attributes=False
-                    # setting it to True errors out with
-                    # GraphQl query Failed: Cannot query field 'ownAttrib' on type 'VersionNode'. Did you mean 'attrib'?
                 )
             else:
                 raise ValueError(
