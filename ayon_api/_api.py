@@ -18,6 +18,9 @@ from .constants import (
 )
 from .server_api import ServerAPI
 from .exceptions import FailedServiceInit
+from .utils import (
+    get_default_settings_variant as _get_default_settings_variant
+)
 
 
 class GlobalServerAPI(ServerAPI):
@@ -502,6 +505,8 @@ def get_default_settings_variant():
         Union[str, None]: name of variant or None.
 
     """
+    if not GlobalContext.is_connection_created():
+        return _get_default_settings_variant()
     con = get_server_api_connection()
     return con.get_default_settings_variant()
 
@@ -722,6 +727,7 @@ def get_events(*args, **kwargs):
 
     Args:
         topics (Optional[Iterable[str]]): Name of topics.
+        event_ids (Optional[Iterable[str]]): Event ids.
         project_names (Optional[Iterable[str]]): Project on which
             event happened.
         states (Optional[Iterable[str]]): Filtering by states.
@@ -746,6 +752,22 @@ def get_events(*args, **kwargs):
 
 
 def update_event(*args, **kwargs):
+    """Update event data.
+
+    Args:
+        event_id (str): Event id.
+        sender (Optional[str]): New sender of event.
+        project_name (Optional[str]): New project name.
+        username (Optional[str]): New username.
+        status (Optional[str]): New event status. Enum: "pending",
+            "in_progress", "finished", "failed", "aborted", "restarted"
+        description (Optional[str]): New description.
+        summary (Optional[dict[str, Any]]): New summary.
+        payload (Optional[dict[str, Any]]): New payload.
+        progress (Optional[int]): New progress. Range [0-100].
+        retries (Optional[int]): New retries.
+
+    """
     con = get_server_api_connection()
     return con.update_event(*args, **kwargs)
 
@@ -759,7 +781,7 @@ def dispatch_event(*args, **kwargs):
         event_hash (Optional[str]): Event hash.
         project_name (Optional[str]): Project name.
         username (Optional[str]): Username which triggered event.
-        dependencies (Optional[list[str]]): List of event id dependencies.
+        depends_on (Optional[str]): Add dependency to another event.
         description (Optional[str]): Description of event.
         summary (Optional[dict[str, Any]]): Summary of event that can be used
             for simple filtering on listeners.
@@ -769,6 +791,8 @@ def dispatch_event(*args, **kwargs):
         store (Optional[bool]): Store event in event queue for possible
             future processing otherwise is event send only
             to active listeners.
+        dependencies (Optional[list[str]]): Deprecated.
+            List of event id dependencies.
 
     Returns:
         RestApiResponse: Response from server.
@@ -2370,6 +2394,8 @@ def get_folders(*args, **kwargs):
             children. Ignored when None, default behavior.
         statuses (Optional[Iterable[str]]): Folder statuses used
             for filtering.
+        assignees_all (Optional[Iterable[str]]): Filter by assigness
+            on children tasks. Task must have all of passed assignees.
         tags (Optional[Iterable[str]]): Folder tags used
             for filtering.
         active (Optional[bool]): Filter active/inactive folders.
@@ -2992,10 +3018,12 @@ def get_versions(*args, **kwargs):
             version filtering.
         product_ids (Optional[Iterable[str]]): Product ids used for
             version filtering.
+        task_ids (Optional[Iterable[str]]): Task ids used for
+            version filtering.
         versions (Optional[Iterable[int]]): Versions we're interested in.
-        hero (Optional[bool]): Receive also hero versions when set to true.
-        standard (Optional[bool]): Receive versions which are not hero when
-            set to true.
+        hero (Optional[bool]): Skip hero versions when set to False.
+        standard (Optional[bool]): Skip standard (non-hero) when
+            set to False.
         latest (Optional[bool]): Return only latest version of standard
             versions. This can be combined only with 'standard' attribute
             set to True.
@@ -3250,6 +3278,7 @@ def update_version(*args, **kwargs):
         version (Optional[int]): New version.
         product_id (Optional[str]): New product id.
         task_id (Optional[Union[str, None]]): New task id.
+        author (Optional[str]): New author username.
         attrib (Optional[dict[str, Any]]): New attributes.
         data (Optional[dict[str, Any]]): New data.
         tags (Optional[Iterable[str]]): New tags.
@@ -3277,9 +3306,10 @@ def delete_version(*args, **kwargs):
 def get_representations(*args, **kwargs):
     """Get representation entities based on passed filters from server.
 
-    Todos:
+    .. todo::
+
         Add separated function for 'names_by_version_ids' filtering.
-            Because can't be combined with others.
+        Because can't be combined with others.
 
     Args:
         project_name (str): Name of project where to look for versions.
@@ -3289,7 +3319,7 @@ def get_representations(*args, **kwargs):
             names used for representation filtering.
         version_ids (Optional[Iterable[str]]): Version ids used for
             representation filtering. Versions are parents of
-                representations.
+            representations.
         names_by_version_ids (Optional[bool]): Find representations
             by names and version ids. This filter discard all
             other filters.
@@ -4028,7 +4058,10 @@ def delete_link(*args, **kwargs):
 def get_entities_links(*args, **kwargs):
     """Helper method to get links from server for entity types.
 
-    Example output::
+    .. highlight:: text
+    .. code-block:: text
+
+        Example output:
         {
             "59a212c0d2e211eda0e20242ac120001": [
                 {
@@ -4049,12 +4082,12 @@ def get_entities_links(*args, **kwargs):
     Args:
         project_name (str): Project where links are.
         entity_type (Literal["folder", "task", "product",
-            "version", "representations"]): Entity type.
+        |    "version", "representations"]): Entity type.
         entity_ids (Optional[Iterable[str]]): Ids of entities for which
-            links should be received.
+        |    links should be received.
         link_types (Optional[Iterable[str]]): Link type filters.
         link_direction (Optional[Literal["in", "out"]]): Link direction
-            filter.
+        |    filter.
         link_names (Optional[Iterable[str]]): Link name filters.
         link_name_regex (Optional[str]): Regex filter for link name.
 
